@@ -2,19 +2,21 @@ name: CD - Deploy to Kubernetes
 
 on:
   workflow_run:
-    workflows: ["CI - Build & Push Docker"]
-    types: ["completed"]
+    workflows: ["CI - Build & Push Docker"]   # deve ser IGUAL ao name: do seu CI
+    types: [completed]
+    # opcional: limite ao main; se seu CI só roda no main, ajuda a evitar falsos positivos
+    branches: [ main ]
+  workflow_dispatch: {}                        # permite acionar manualmente para testar
 
 permissions:
   contents: read
 
 jobs:
   deploy:
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
-    runs-on: self-hosted
+    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
+    runs-on: [self-hosted, Windows, X64]       # combine as labels do SEU runner
     environment: production
 
-    # força PowerShell por padrão em todos os steps
     defaults:
       run:
         shell: pwsh
@@ -27,18 +29,25 @@ jobs:
         id: vars
         run: |
           "IMAGE=kaua45otto/monitor" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          "TAG_SHA=${{ github.event.workflow_run.head_sha }}" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          # se for workflow_run, pega o SHA do CI; se for manual, usa o HEAD do repo
+          $sha = if ("${{ github.event_name }}" -eq "workflow_run") { "${{ github.event.workflow_run.head_sha }}" } else { "${{ github.sha }}" }
+          "TAG_SHA=$sha" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
-          # K8S_NAMESPACE: usa secret se existir; senão "default"
           $ns = "${{ secrets.K8S_NAMESPACE }}"
           if ([string]::IsNullOrWhiteSpace($ns)) { $ns = "default" }
           "NAMESPACE=$ns" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
-          # (opcional) contexto do kubeconfig (ex.: minikube ou docker-desktop)
           $ctx = "${{ secrets.K8S_CONTEXT }}"
           if (-not [string]::IsNullOrWhiteSpace($ctx)) {
             "K8S_CONTEXT=$ctx" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           }
+
+      - name: Debug vars
+        run: |
+          "IMAGE: ${{ steps.vars.outputs.IMAGE }}"
+          "TAG_SHA: ${{ steps.vars.outputs.TAG_SHA }}"
+          "NAMESPACE: ${{ steps.vars.outputs.NAMESPACE }}"
+          "K8S_CONTEXT: ${{ steps.vars.outputs.K8S_CONTEXT }}"
 
       - name: Setup kubectl
         uses: azure/setup-kubectl@v4
@@ -69,7 +78,7 @@ jobs:
           kubectl get ns $ns *> $null
           if ($LASTEXITCODE -ne 0) { kubectl create ns $ns }
 
-      - name: Apply base manifests (Service, Prometheus, Grafana, Nginx)
+      - name: Apply base manifests
         run: |
           $ns = "${{ steps.vars.outputs.NAMESPACE }}"
           kubectl apply -n $ns -f k8s/service.yaml
@@ -79,7 +88,7 @@ jobs:
           kubectl apply -n $ns -f k8s/nginx-service.yaml
           kubectl apply -n $ns -f k8s/prometheus-config.yaml
 
-      - name: Apply app deployment (idempotente)
+      - name: Apply app deployment
         run: |
           kubectl apply -n "${{ steps.vars.outputs.NAMESPACE }}" -f k8s/deployment.yaml
 
