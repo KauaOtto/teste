@@ -4,7 +4,7 @@ WORKDIR /usr/src/app
 
 # Instala dependências de produção
 COPY package*.json ./
-RUN npm ci --only=production || npm install --production
+RUN npm install
 
 # Copia o resto da aplicação
 COPY . .
