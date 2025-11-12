@@ -2,21 +2,21 @@ name: CD - Deploy to Kubernetes
 
 on:
   workflow_run:
-    workflows: ["CI - Build & Push Docker"]   # deve ser IGUAL ao name: do seu CI
+    workflows: ["CI - Build & Push Docker"]   # tem que ser idêntico ao name do seu CI
     types: [completed]
-    # opcional: limite ao main; se seu CI só roda no main, ajuda a evitar falsos positivos
-    branches: [ main ]
-  workflow_dispatch: {}                        # permite acionar manualmente para testar
+  workflow_dispatch: {}                        # permite rodar manual para testar
 
 permissions:
   contents: read
 
 jobs:
   deploy:
+    # roda se o CI terminou com sucesso OU se você disparou manualmente
     if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
-    runs-on: [self-hosted, Windows, X64]       # combine as labels do SEU runner
+    runs-on: [self-hosted, Windows, X64]       # use as MESMAS labels que aparecem no seu runner
     environment: production
 
+    # força PowerShell como shell padrão no Windows
     defaults:
       run:
         shell: pwsh
@@ -29,7 +29,6 @@ jobs:
         id: vars
         run: |
           "IMAGE=kaua45otto/monitor" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          # se for workflow_run, pega o SHA do CI; se for manual, usa o HEAD do repo
           $sha = if ("${{ github.event_name }}" -eq "workflow_run") { "${{ github.event.workflow_run.head_sha }}" } else { "${{ github.sha }}" }
           "TAG_SHA=$sha" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
@@ -37,24 +36,18 @@ jobs:
           if ([string]::IsNullOrWhiteSpace($ns)) { $ns = "default" }
           "NAMESPACE=$ns" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
+          # opcional: force contexto (ex.: minikube ou docker-desktop)
           $ctx = "${{ secrets.K8S_CONTEXT }}"
           if (-not [string]::IsNullOrWhiteSpace($ctx)) {
             "K8S_CONTEXT=$ctx" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           }
-
-      - name: Debug vars
-        run: |
-          "IMAGE: ${{ steps.vars.outputs.IMAGE }}"
-          "TAG_SHA: ${{ steps.vars.outputs.TAG_SHA }}"
-          "NAMESPACE: ${{ steps.vars.outputs.NAMESPACE }}"
-          "K8S_CONTEXT: ${{ steps.vars.outputs.K8S_CONTEXT }}"
 
       - name: Setup kubectl
         uses: azure/setup-kubectl@v4
         with:
           version: 'latest'
 
-      - name: Select context (optional)
+      - name: Select context (opcional)
         if: ${{ steps.vars.outputs.K8S_CONTEXT != '' }}
         run: |
           kubectl config use-context "${{ steps.vars.outputs.K8S_CONTEXT }}"
@@ -81,16 +74,22 @@ jobs:
       - name: Apply base manifests
         run: |
           $ns = "${{ steps.vars.outputs.NAMESPACE }}"
-          kubectl apply -n $ns -f k8s/service.yaml
-          kubectl apply -n $ns -f k8s/prometheus-deployment.yaml
+          # MONITOR
+          kubectl apply -n $ns -f k8s/monitor-service.yaml
+          kubectl apply -n $ns -f k8s/monitor-deployment.yaml
+          # GRAFANA
+          kubectl apply -n $ns -f k8s/grafana-service.yaml
           kubectl apply -n $ns -f k8s/grafana-deployment.yaml
-          kubectl apply -n $ns -f k8s/nginx-deployment.yaml
+          # NGINX
           kubectl apply -n $ns -f k8s/nginx-service.yaml
-          kubectl apply -n $ns -f k8s/prometheus-config.yaml
+          kubectl apply -n $ns -f k8s/nginx-deployment.yaml
+          # PROMETHEUS
+          kubectl apply -n $ns -f k8s/prometheus-service.yaml
+          kubectl apply -n $ns -f k8s/prometheus-deployment.yaml
 
-      - name: Apply app deployment
+      - name: Apply app deployment (idempotente)
         run: |
-          kubectl apply -n "${{ steps.vars.outputs.NAMESPACE }}" -f k8s/deployment.yaml
+          kubectl apply -n "${{ steps.vars.outputs.NAMESPACE }}" -f k8s/monitor-deployment.yaml
 
       - name: Set image to new tag
         run: |
