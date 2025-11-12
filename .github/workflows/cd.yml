@@ -2,21 +2,19 @@ name: CD - Deploy to Kubernetes
 
 on:
   workflow_run:
-    workflows: ["CI - Build & Push Docker"]   # tem que ser idêntico ao name do seu CI
+    workflows: ["CI - Build & Push Docker"]   # deve ser idêntico ao name do seu CI
     types: [completed]
-  workflow_dispatch: {}                        # permite rodar manual para testar
+  workflow_dispatch: {}                        # permite rodar manualmente
 
 permissions:
   contents: read
 
 jobs:
   deploy:
-    # roda se o CI terminou com sucesso OU se você disparou manualmente
     if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
-    runs-on: [self-hosted, Windows, X64]       # use as MESMAS labels que aparecem no seu runner
+    runs-on: [self-hosted, Windows, X64]       # use as labels que seu runner mostra em Settings > Actions > Runners
     environment: production
 
-    # força PowerShell como shell padrão no Windows
     defaults:
       run:
         shell: pwsh
@@ -28,19 +26,32 @@ jobs:
       - name: Set vars
         id: vars
         run: |
-          "IMAGE=kaua45otto/monitor" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          $sha = if ("${{ github.event_name }}" -eq "workflow_run") { "${{ github.event.workflow_run.head_sha }}" } else { "${{ github.sha }}" }
-          "TAG_SHA=$sha" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          # IMAGE
+          "IMAGE=kaua45otto/monitor" | Add-Content -Path $env:GITHUB_OUTPUT
 
+          # TAG_SHA (usa o SHA do workflow de origem se vier de workflow_run; senão o SHA atual)
+          if ("${{ github.event_name }}" -eq "workflow_run") {
+            $sha = "${{ github.event.workflow_run.head_sha }}"
+          } else {
+            $sha = "${{ github.sha }}"
+          }
+          "TAG_SHA=$sha" | Add-Content -Path $env:GITHUB_OUTPUT
+
+          # NAMESPACE (secret ou default)
           $ns = "${{ secrets.K8S_NAMESPACE }}"
           if ([string]::IsNullOrWhiteSpace($ns)) { $ns = "default" }
-          "NAMESPACE=$ns" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "NAMESPACE=$ns" | Add-Content -Path $env:GITHUB_OUTPUT
 
-          # opcional: force contexto (ex.: minikube ou docker-desktop)
+          # (opcional) contexto do kubectl (ex.: minikube ou docker-desktop)
           $ctx = "${{ secrets.K8S_CONTEXT }}"
           if (-not [string]::IsNullOrWhiteSpace($ctx)) {
-            "K8S_CONTEXT=$ctx" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+            "K8S_CONTEXT=$ctx" | Add-Content -Path $env:GITHUB_OUTPUT
           }
+
+          Write-Host "IMAGE: ${{ steps.vars.outputs.IMAGE }}"
+          Write-Host "TAG_SHA: ${{ steps.vars.outputs.TAG_SHA }}"
+          Write-Host "NAMESPACE: ${{ steps.vars.outputs.NAMESPACE }}"
+          Write-Host "K8S_CONTEXT: ${{ steps.vars.outputs.K8S_CONTEXT }}"
 
       - name: Setup kubectl
         uses: azure/setup-kubectl@v4
@@ -86,10 +97,6 @@ jobs:
           # PROMETHEUS
           kubectl apply -n $ns -f k8s/prometheus-service.yaml
           kubectl apply -n $ns -f k8s/prometheus-deployment.yaml
-
-      - name: Apply app deployment (idempotente)
-        run: |
-          kubectl apply -n "${{ steps.vars.outputs.NAMESPACE }}" -f k8s/monitor-deployment.yaml
 
       - name: Set image to new tag
         run: |
