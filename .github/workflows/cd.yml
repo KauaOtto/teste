@@ -35,17 +35,17 @@ jobs:
         env:
           KUBE_CONFIG_DATA: ${{ secrets.KUBE_CONFIG_DATA }}
         run: |
-          set -e
+          set -euo pipefail
           mkdir -p "$HOME/.kube"
 
           # Se o secret já for YAML (contém 'apiVersion:'), grava direto.
           # Senão, decodifica de base64.
-          if echo "$KUBE_CONFIG_DATA" | grep -q "apiVersion:"; then
+          if echo "$KUBE_CONFIG_DATA" | grep -q "^apiVersion:"; then
             echo "Detected plain YAML kubeconfig in secret."
-            printf "%s" "$KUBE_CONFIG_DATA" > "$HOME/.kube/config"
+            printf "%s\n" "$KUBE_CONFIG_DATA" > "$HOME/.kube/config"
           else
             echo "Detected base64 kubeconfig in secret."
-            printf "%s" "$KUBE_CONFIG_DATA" | base64 -d > "$HOME/.kube/config"
+            printf "%s" "$KUBE_CONFIG_DATA" | base64 -di > "$HOME/.kube/config"
           fi
 
           # Remove CRLF (Windows) e garante perms
@@ -56,17 +56,17 @@ jobs:
           head -n 5 "$HOME/.kube/config"
           grep -q '^apiVersion:' "$HOME/.kube/config" || { echo "Invalid kubeconfig: missing apiVersion"; cat "$HOME/.kube/config"; exit 1; }
 
-            - name: Verify cluster
-              run: |
-                kubectl config current-context
-                kubectl version --client || true
-                # tenta por até 30s
-                for i in {1..6}; do
-                  kubectl get nodes -o wide && exit 0
-                  echo "Aguardando API do cluster..."
-                  sleep 5
-                done
-                echo "Cluster inacessível"; exit 1
+      - name: Verify cluster
+        run: |
+          kubectl config current-context || true
+          kubectl version --client || true
+          # tenta por até 30s
+          for i in {1..6}; do
+            kubectl get nodes -o wide && exit 0
+            echo "Aguardando API do cluster..."
+            sleep 5
+          done
+          echo "Cluster inacessível"; exit 1
 
       - name: Create namespace if not exists
         run: |
