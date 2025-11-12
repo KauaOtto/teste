@@ -2,9 +2,9 @@ name: CD - Deploy to Kubernetes
 
 on:
   workflow_run:
-    workflows: ["CI - Build & Push Docker"]  # tem que ser idêntico ao "name:" do seu CI
+    workflows: ["CI - Build & Push Docker"]  # deve bater com o name do CI
     types: [completed]
-  workflow_dispatch: {}                       # permite disparar manual pra testar
+  workflow_dispatch: {}
 
 permissions:
   contents: read
@@ -12,44 +12,33 @@ permissions:
 jobs:
   deploy:
     if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
-    runs-on: [self-hosted, Windows, X64]      # use as labels EXACT do seu runner
+    runs-on: [self-hosted, Windows, X64]
     environment: production
-
-    # >>> Shell padrão: Windows PowerShell (não pwsh)
-    defaults:
-      run:
-        shell: powershell
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          # Em runners self-hosted às vezes o "clean" falha; se continuar dando 128, troque para clean: false
-          clean: true
-
-      # Se ainda aparecer erro 128 de git (repo sujo), descomente este passo:
-      # - name: Git safe directory fix (optional)
-      #   run: |
-      #     git config --global --add safe.directory '*'
+          clean: false                     # evita erro 128 em runner self-hosted
 
       - name: Set vars
         id: vars
+        shell: powershell
         run: |
           "IMAGE=kaua45otto/monitor" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
-          if ("${{ github.event_name }}" -eq "workflow_run") {
-            $sha = "${{ github.event.workflow_run.head_sha }}"
-          } else {
-            $sha = "${{ github.sha }}"
-          }
-          "TAG_SHA=$sha" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          if ("${{ github.event_name }}" -eq "workflow_run") { $sha = "${{ github.event.workflow_run.head_sha }}" }
+          else { $sha = "${{ github.sha }}" }
+
+          "FULL_SHA=$sha"             | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "SHORT_SHA=$($sha.Substring(0,7))" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
           $ns = "${{ secrets.K8S_NAMESPACE }}"
           if ([string]::IsNullOrWhiteSpace($ns)) { $ns = "default" }
           "NAMESPACE=$ns" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
-          $ctx = "${{ secrets.K8S_CONTEXT }}"  # opcional (ex.: minikube, docker-desktop)
+          $ctx = "${{ secrets.K8S_CONTEXT }}"   # opcional (ex.: minikube / docker-desktop)
           if (-not [string]::IsNullOrWhiteSpace($ctx)) {
             "K8S_CONTEXT=$ctx" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           }
@@ -59,59 +48,105 @@ jobs:
         with:
           version: 'latest'
 
+      - name: Configure kubeconfig (secret ou arquivo local)
+        shell: powershell
+        env:
+          KUBE_CONFIG_DATA: ${{ secrets.KUBE_CONFIG_DATA }}
+        run: |
+          $dest = "$env:USERPROFILE\.kube\config"
+          New-Item -ItemType Directory -Path "$env:USERPROFILE\.kube" -Force | Out-Null
+          if (-not [string]::IsNullOrWhiteSpace($env:KUBE_CONFIG_DATA)) {
+            Write-Host "Usando kubeconfig do secret (base64 ou YAML)."
+            if ($env:KUBE_CONFIG_DATA -match "apiVersion:") {
+              $env:KUBE_CONFIG_DATA | Out-File -FilePath $dest -Encoding utf8
+            } else {
+              [System.Convert]::FromBase64String($env:KUBE_CONFIG_DATA) | Set-Content -Encoding Byte -Path $dest
+            }
+          } else {
+            Write-Host "Usando kubeconfig local do runner: $dest"
+            if (-not (Test-Path $dest)) { throw "Kubeconfig não encontrado e nenhum secret KUBE_CONFIG_DATA foi fornecido." }
+          }
+
       - name: Select context (opcional)
         if: ${{ steps.vars.outputs.K8S_CONTEXT != '' }}
+        shell: powershell
         run: |
           kubectl config use-context "${{ steps.vars.outputs.K8S_CONTEXT }}"
 
       - name: Verify cluster
+        shell: powershell
         run: |
           kubectl config current-context
           kubectl version --client
           $ok = $false
-          for ($i = 0; $i -lt 6; $i++) {
+          for ($i=0; $i -lt 6; $i++) {
             kubectl get nodes -o wide *> $null
-            if ($LASTEXITCODE -eq 0) { $ok = $true; kubectl get nodes -o wide; break }
-            Write-Host "Aguardando API do cluster..."
-            Start-Sleep -Seconds 5
+            if ($LASTEXITCODE -eq 0) { $ok=$true; kubectl get nodes -o wide; break }
+            Write-Host "Aguardando API do cluster..."; Start-Sleep -Seconds 5
           }
           if (-not $ok) { throw "Cluster inacessível" }
 
       - name: Create namespace if not exists
+        shell: powershell
         run: |
           $ns = "${{ steps.vars.outputs.NAMESPACE }}"
           kubectl get ns $ns *> $null
           if ($LASTEXITCODE -ne 0) { kubectl create ns $ns }
 
-      - name: Apply base manifests
-        run: |
-          $ns = "${{ steps.vars.outputs.NAMESPACE }}"
-          # MONITOR
-          kubectl apply -n $ns -f k8s/monitor-service.yaml
-          kubectl apply -n $ns -f k8s/monitor-deployment.yaml
-          # GRAFANA
-          kubectl apply -n $ns -f k8s/grafana-service.yaml
-          kubectl apply -n $ns -f k8s/grafana-deployment.yaml
-          # NGINX
-          kubectl apply -n $ns -f k8s/nginx-service.yaml
-          kubectl apply -n $ns -f k8s/nginx-deployment.yaml
-          # PROMETHEUS
-          kubectl apply -n $ns -f k8s/prometheus-service.yaml
-          kubectl apply -n $ns -f k8s/prometheus-deployment.yaml
-
-            - name: Set image to new tag
+      - name: Apply manifests (idempotente)
         shell: powershell
         run: |
-          kubectl set image deployment/monitor `
-            monitor="${{ steps.vars.outputs.IMAGE }}:${{ steps.vars.outputs.TAG_SHA }}" `
-            -n "${{ steps.vars.outputs.NAMESPACE }}"
+          $ns = "${{ steps.vars.outputs.NAMESPACE }}"
+          # Aplique o que existir; se faltar algum arquivo, não quebra
+          foreach ($f in @(
+            "k8s/service.yaml",
+            "k8s/deployment.yaml",
+            "k8s/monitor-service.yaml",
+            "k8s/monitor-deployment.yaml",
+            "k8s/nginx-service.yaml",
+            "k8s/nginx-deployment.yaml",
+            "k8s/grafana-service.yaml",
+            "k8s/grafana-deployment.yaml",
+            "k8s/prometheus-service.yaml",
+            "k8s/prometheus-deployment.yaml",
+            "k8s/prometheus-config.yaml"
+          )) {
+            if (Test-Path $f) {
+              Write-Host "kubectl apply -n $ns -f $f"
+              kubectl apply -n $ns -f $f
+            }
+          }
 
-      - name: Try rollout (1ª tentativa)
+      # =========== ROLLOUT com fallback ===========
+      - name: Set image (FULL SHA) e tentar rollout
         shell: powershell
         continue-on-error: true
         run: |
-          kubectl rollout status deployment/monitor -n "${{ steps.vars.outputs.NAMESPACE }}" --timeout=300s
+          $ns = "${{ steps.vars.outputs.NAMESPACE }}"
+          $img = "${{ steps.vars.outputs.IMAGE }}:${{ steps.vars.outputs.FULL_SHA }}"
+          kubectl set image deploy/monitor monitor=$img -n $ns
+          kubectl rollout status deploy/monitor -n $ns --timeout=300s
 
+      - name: Fallback para SHORT SHA
+        if: ${{ failure() }}
+        shell: powershell
+        continue-on-error: true
+        run: |
+          $ns = "${{ steps.vars.outputs.NAMESPACE }}"
+          $img = "${{ steps.vars.outputs.IMAGE }}:${{ steps.vars.outputs.SHORT_SHA }}"
+          kubectl set image deploy/monitor monitor=$img -n $ns
+          kubectl rollout status deploy/monitor -n $ns --timeout=300s
+
+      - name: Fallback final para :latest
+        if: ${{ failure() }}
+        shell: powershell
+        run: |
+          $ns = "${{ steps.vars.outputs.NAMESPACE }}"
+          $img = "${{ steps.vars.outputs.IMAGE }}:latest"
+          kubectl set image deploy/monitor monitor=$img -n $ns
+          kubectl rollout status deploy/monitor -n $ns --timeout=300s
+
+      # =========== DIAGNÓSTICO SE FALHAR ===========
       - name: Diagnose on failure
         if: ${{ failure() }}
         shell: powershell
@@ -129,24 +164,14 @@ jobs:
           Write-Host "==== LOGS (últimos 200 por contêiner) ===="
           $pods = kubectl get pods -n $ns -l app=monitor -o jsonpath='{.items[*].metadata.name}'
           foreach ($p in $pods.Split(' ')) {
-            Write-Host "---- $p ----"
-            kubectl logs $p -n $ns --all-containers --tail=200
+            if ($p) {
+              Write-Host "---- $p ----"
+              kubectl logs $p -n $ns --all-containers --tail=200
+            }
           }
 
-      - name: Force restart (scale to zero → up) and wait again
-        if: ${{ failure() }}
+      - name: Show services (debug)
         shell: powershell
         run: |
-          $ns = "${{ steps.vars.outputs.NAMESPACE }}"
-          Write-Host "==== SCALE DOWN ===="
-          kubectl scale deployment/monitor -n $ns --replicas=0
-          Start-Sleep -Seconds 10
-          Write-Host "==== CLEANING STUCK OLD PODS/RS ===="
-          # Se ainda tiver pod antigo pendente, elimina
-          $pods = kubectl get pods -n $ns -l app=monitor -o jsonpath='{.items[*].metadata.name}'
-          foreach ($p in $pods.Split(' ')) { if ($p) { kubectl delete pod $p -n $ns --grace-period=5 --force }} 
-          Start-Sleep -Seconds 5
-          Write-Host "==== SCALE UP ===="
-          kubectl scale deployment/monitor -n $ns --replicas=1
-          Write-Host "==== ROLLOUT STATUS (2ª tentativa) ===="
-          kubectl rollout status deployment/monitor -n $ns --timeout=300s
+          kubectl get svc -n "${{ steps.vars.outputs.NAMESPACE }}"
+          kubectl get pods -o wide -n "${{ steps.vars.outputs.NAMESPACE }}"
