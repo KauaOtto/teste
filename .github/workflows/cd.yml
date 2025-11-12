@@ -99,15 +99,54 @@ jobs:
           kubectl apply -n $ns -f k8s/prometheus-service.yaml
           kubectl apply -n $ns -f k8s/prometheus-deployment.yaml
 
-      - name: Set image to new tag
+            - name: Set image to new tag
+        shell: powershell
         run: |
-          kubectl set image deployment/monitor monitor="${{ steps.vars.outputs.IMAGE }}:${{ steps.vars.outputs.TAG_SHA }}" -n "${{ steps.vars.outputs.NAMESPACE }}"
+          kubectl set image deployment/monitor `
+            monitor="${{ steps.vars.outputs.IMAGE }}:${{ steps.vars.outputs.TAG_SHA }}" `
+            -n "${{ steps.vars.outputs.NAMESPACE }}"
 
-      - name: Wait rollout
+      - name: Try rollout (1ª tentativa)
+        shell: powershell
+        continue-on-error: true
         run: |
-          kubectl rollout status deployment/monitor -n "${{ steps.vars.outputs.NAMESPACE }}" --timeout=180s
+          kubectl rollout status deployment/monitor -n "${{ steps.vars.outputs.NAMESPACE }}" --timeout=300s
 
-      - name: Show services (debug)
+      - name: Diagnose on failure
+        if: ${{ failure() }}
+        shell: powershell
         run: |
-          kubectl get svc -n "${{ steps.vars.outputs.NAMESPACE }}"
-          kubectl get pods -o wide -n "${{ steps.vars.outputs.NAMESPACE }}"
+          $ns = "${{ steps.vars.outputs.NAMESPACE }}"
+          Write-Host "==== DESCRIBE DEPLOYMENT ===="
+          kubectl describe deployment/monitor -n $ns
+          Write-Host "==== REPLICASETS ===="
+          kubectl get rs -n $ns -l app=monitor -o wide
+          kubectl describe rs -n $ns -l app=monitor
+          Write-Host "==== PODS ===="
+          kubectl get pods -n $ns -l app=monitor -o wide
+          Write-Host "==== EVENTS (últimos 200) ===="
+          kubectl get events -n $ns --sort-by=.lastTimestamp | Select-Object -Last 200
+          Write-Host "==== LOGS (últimos 200 por contêiner) ===="
+          $pods = kubectl get pods -n $ns -l app=monitor -o jsonpath='{.items[*].metadata.name}'
+          foreach ($p in $pods.Split(' ')) {
+            Write-Host "---- $p ----"
+            kubectl logs $p -n $ns --all-containers --tail=200
+          }
+
+      - name: Force restart (scale to zero → up) and wait again
+        if: ${{ failure() }}
+        shell: powershell
+        run: |
+          $ns = "${{ steps.vars.outputs.NAMESPACE }}"
+          Write-Host "==== SCALE DOWN ===="
+          kubectl scale deployment/monitor -n $ns --replicas=0
+          Start-Sleep -Seconds 10
+          Write-Host "==== CLEANING STUCK OLD PODS/RS ===="
+          # Se ainda tiver pod antigo pendente, elimina
+          $pods = kubectl get pods -n $ns -l app=monitor -o jsonpath='{.items[*].metadata.name}'
+          foreach ($p in $pods.Split(' ')) { if ($p) { kubectl delete pod $p -n $ns --grace-period=5 --force }} 
+          Start-Sleep -Seconds 5
+          Write-Host "==== SCALE UP ===="
+          kubectl scale deployment/monitor -n $ns --replicas=1
+          Write-Host "==== ROLLOUT STATUS (2ª tentativa) ===="
+          kubectl rollout status deployment/monitor -n $ns --timeout=300s

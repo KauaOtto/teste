@@ -3,33 +3,34 @@ kind: Deployment
 metadata:
   name: monitor
 spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: monitor
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   template:
-    metadata:
-      labels:
-        app: monitor
     spec:
+      terminationGracePeriodSeconds: 10   # não deixe infinito
       containers:
         - name: monitor
-          image: kaua45otto/monitor:latest
           imagePullPolicy: Always
-          ports:
-            - containerPort: 3000
-          env:
-            - name: PORT
-              value: "3000"
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sh","-c","sleep 3"]  # dá tempo ao proxy/ingress
           readinessProbe:
             httpGet:
-              path: /healthz
-              port: 3000
-            initialDelaySeconds: 3
+              path: /
+              port: 3000            # ajuste pro seu container
+            initialDelaySeconds: 5
             periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 6
           livenessProbe:
             httpGet:
-              path: /healthz
+              path: /
               port: 3000
-            initialDelaySeconds: 5
+            initialDelaySeconds: 10
             periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
