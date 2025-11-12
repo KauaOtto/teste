@@ -1,0 +1,13 @@
+# Cria o Service pra deixar o Prometheus acessível
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus # nome do serviço
+spec:
+  selector:
+    app: prometheus # conecta com o deployment do Prometheus (tem que ter o mesmo nome)
+  ports:
+    - protocol: TCP # tipo de conexão usada
+      port: 9090 # porta externa pra acessar o Prometheus
+      targetPort: 9090 # porta interna do container
+  type: NodePort # deixa o Prometheus acessível de fora do cluster (via IP externo)

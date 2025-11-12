@@ -1,0 +1,32 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana # nome do deployment do Grafana
+spec:
+  replicas: 1 # apenas um pod do Grafana é suficiente
+  selector:
+    matchLabels:
+      app: grafana
+  template:
+    metadata:
+      labels:
+        app: grafana
+    spec:
+      containers:
+      - name: grafana
+        image: grafana/grafana:latest # usa a imagem oficial do Grafana
+        ports:
+        - containerPort: 3000 # porta padrão de acesso do Grafana
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana-service # nome do serviço do Grafana
+spec:
+  type: NodePort # permite acessar o Grafana pelo navegador (via porta do host)
+  selector:
+    app: grafana
+  ports:
+  - port: 3000 # porta interna usada dentro do cluster
+    targetPort: 3000 # porta do container Grafana
+    nodePort: 30300 # porta externa pra acessar (ex: http://127.0.0.1:30300)

@@ -1,0 +1,17 @@
+# k8s/nginx-service.yaml
+# Esse arquivo cria um "service" pro NGINX dentro do cluster
+# Ele faz o papel de um "endereço fixo" pra acessar o pod do NGINX
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx-service       # Nome do serviço (usado pelo comando minikube service nginx-service)
+spec:
+  type: NodePort            # Faz o NGINX ficar acessível pelo navegador do host (via porta do minikube)
+  selector:
+    app: nginx              # Tem que bater com o "label" do nginx-deployment.yaml
+  ports:
+    - name: http
+      port: 80              # Porta interna do NGINX (porta do container)
+      targetPort: 80        # Porta do container que o NGINX escuta
+      nodePort: 32000       # Porta externa (host Minikube) — opcional, você pode deixar o K8s escolher

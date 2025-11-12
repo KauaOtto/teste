@@ -1,0 +1,50 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus # nome do deployment do Prometheus
+spec:
+  replicas: 1 # apenas um pod é suficiente pra monitorar o sistema
+  selector:
+    matchLabels:
+      app: prometheus
+  template:
+    metadata:
+      labels:
+        app: prometheus
+    spec:
+      containers:
+      - name: prometheus
+        image: prom/prometheus:latest # usa a imagem oficial do Prometheus
+        ports:
+        - containerPort: 9090 # porta padrão do Prometheus
+        volumeMounts:
+        - name: prometheus-config
+          mountPath: /etc/prometheus # monta o arquivo de configuração dentro do container
+      volumes:
+      - name: prometheus-config
+        configMap:
+          name: prometheus-config # referencia o configMap criado abaixo
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config # nome do arquivo de configuração do Prometheus
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 5s # define o intervalo de coleta de métricas (a cada 5 segundos)
+    scrape_configs:
+      - job_name: 'node-app' # nome da tarefa de coleta do Node.js
+        static_configs:
+          - targets: ['node-service:3123'] # endereço e porta do app Node dentro do cluster
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus-service # nome do serviço do Prometheus
+spec:
+  selector:
+    app: prometheus
+  ports:
+  - port: 9090 # porta interna do cluster pra acessar o Prometheus
+    targetPort: 9090 # porta exposta dentro do container

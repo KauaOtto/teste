@@ -1,0 +1,32 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: node-app # nome do deployment do aplicativo Node
+spec:
+  replicas: 1 # define quantas instâncias do app vão rodar
+  selector:
+    matchLabels:
+      app: node-app # rótulo usado pra identificar o pod
+  template:
+    metadata:
+      labels:
+        app: node-app
+    spec:
+      containers:
+      - name: node-app
+        image: node-app:latest   # imagem do app Node (gerada localmente)
+        imagePullPolicy: Never   # usa a imagem local, sem tentar baixar do Docker Hub (importante pro Minikube)
+        ports:
+        - containerPort: 3123 # porta do container (mesma do server.js)
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: node-service # nome do serviço que expõe o app dentro do cluster
+spec:
+  selector:
+    app: node-app # conecta o serviço ao deployment do Node
+  ports:
+  - protocol: TCP
+    port: 3123 # porta do serviço no cluster
+    targetPort: 3123 # porta dentro do container (onde o app realmente está rodando)

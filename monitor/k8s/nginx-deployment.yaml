@@ -1,0 +1,40 @@
+
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx # nome do deployment do NGINX
+  labels:
+    app: nginx
+spec:
+  replicas: 1  # apenas 1 pod é suficiente pro proxy reverso
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+      - name: nginx
+        image: nginx-proxy:latest   # nome da imagem buildada localmente (feita com o Dockerfile da pasta nginx)
+        imagePullPolicy: Never      # impede o Kubernetes de tentar puxar a imagem da internet (usa a local do Minikube)
+        ports:
+        - containerPort: 80         # expõe a porta 80 dentro do pod (porta padrão HTTP)
+
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx-service
+spec:
+  type: NodePort   # permite acesso externo via porta do host (Minikube)
+  selector:
+    app: nginx
+  ports:
+  - name: http
+    port: 80          # porta interna do cluster
+    targetPort: 80    # porta usada pelo container NGINX
+    nodePort: 30080   # porta acessível externamente (ex: http://127.0.0.1:30080)

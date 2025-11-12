@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: teste-service # nome do serviço que vai expor o app Node.js
+spec:
+  selector:
+    app: teste # rótulo usado pra encontrar o pod certo
+  ports:
+    - protocol: TCP
+      port: 3123         # Porta que será usada dentro do cluster
+      targetPort: 3123   # Porta que o app Node realmente usa
+  type: NodePort # permite acesso externo (fora do cluster, via navegador)
