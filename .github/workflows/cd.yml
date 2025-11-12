@@ -2,7 +2,7 @@ name: CD - Deploy to Kubernetes
 
 on:
   workflow_run:
-    workflows: ["CI - Build & Push Docker"]  # deve bater com o name do CI
+    workflows: ["CI - Build & Push Docker"]
     types: [completed]
   workflow_dispatch: {}
 
@@ -20,28 +20,19 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          clean: false                     # evita erro 128 em runner self-hosted
+          clean: false
 
       - name: Set vars
         id: vars
         shell: powershell
         run: |
           "IMAGE=kaua45otto/monitor" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-
-          if ("${{ github.event_name }}" -eq "workflow_run") { $sha = "${{ github.event.workflow_run.head_sha }}" }
-          else { $sha = "${{ github.sha }}" }
-
-          "FULL_SHA=$sha"             | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          "SHORT_SHA=$($sha.Substring(0,7))" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-
-          $ns = "${{ secrets.K8S_NAMESPACE }}"
-          if ([string]::IsNullOrWhiteSpace($ns)) { $ns = "default" }
+          if ("${{ github.event_name }}" -eq "workflow_run") { $sha = "${{ github.event.workflow_run.head_sha }}" } else { $sha = "${{ github.sha }}" }
+          "FULL_SHA=$sha"                       | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "SHORT_SHA=$($sha.Substring(0,7))"    | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          $ns = "${{ secrets.K8S_NAMESPACE }}"; if ([string]::IsNullOrWhiteSpace($ns)) { $ns = "default" }
           "NAMESPACE=$ns" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-
-          $ctx = "${{ secrets.K8S_CONTEXT }}"   # opcional (ex.: minikube / docker-desktop)
-          if (-not [string]::IsNullOrWhiteSpace($ctx)) {
-            "K8S_CONTEXT=$ctx" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          }
+          $ctx = "${{ secrets.K8S_CONTEXT }}"; if (-not [string]::IsNullOrWhiteSpace($ctx)) { "K8S_CONTEXT=$ctx" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append }
 
       - name: Setup kubectl
         uses: azure/setup-kubectl@v4
@@ -56,48 +47,42 @@ jobs:
           $dest = "$env:USERPROFILE\.kube\config"
           New-Item -ItemType Directory -Path "$env:USERPROFILE\.kube" -Force | Out-Null
           if (-not [string]::IsNullOrWhiteSpace($env:KUBE_CONFIG_DATA)) {
-            Write-Host "Usando kubeconfig do secret (base64 ou YAML)."
             if ($env:KUBE_CONFIG_DATA -match "apiVersion:") {
               $env:KUBE_CONFIG_DATA | Out-File -FilePath $dest -Encoding utf8
             } else {
               [System.Convert]::FromBase64String($env:KUBE_CONFIG_DATA) | Set-Content -Encoding Byte -Path $dest
             }
-          } else {
-            Write-Host "Usando kubeconfig local do runner: $dest"
-            if (-not (Test-Path $dest)) { throw "Kubeconfig não encontrado e nenhum secret KUBE_CONFIG_DATA foi fornecido." }
+          } elseif (-not (Test-Path $dest)) {
+            throw "Sem kubeconfig: informe KUBE_CONFIG_DATA ou deixe ~/.kube/config no runner."
           }
 
       - name: Select context (opcional)
         if: ${{ steps.vars.outputs.K8S_CONTEXT != '' }}
         shell: powershell
-        run: |
-          kubectl config use-context "${{ steps.vars.outputs.K8S_CONTEXT }}"
+        run: kubectl config use-context "${{ steps.vars.outputs.K8S_CONTEXT }}"
 
       - name: Verify cluster
         shell: powershell
         run: |
           kubectl config current-context
           kubectl version --client
-          $ok = $false
           for ($i=0; $i -lt 6; $i++) {
             kubectl get nodes -o wide *> $null
-            if ($LASTEXITCODE -eq 0) { $ok=$true; kubectl get nodes -o wide; break }
-            Write-Host "Aguardando API do cluster..."; Start-Sleep -Seconds 5
+            if ($LASTEXITCODE -eq 0) { kubectl get nodes -o wide; break }
+            Start-Sleep -Seconds 5
+            if ($i -eq 5) { throw "Cluster inacessível" }
           }
-          if (-not $ok) { throw "Cluster inacessível" }
 
       - name: Create namespace if not exists
         shell: powershell
         run: |
           $ns = "${{ steps.vars.outputs.NAMESPACE }}"
-          kubectl get ns $ns *> $null
-          if ($LASTEXITCODE -ne 0) { kubectl create ns $ns }
+          kubectl get ns $ns *> $null; if ($LASTEXITCODE -ne 0) { kubectl create ns $ns }
 
       - name: Apply manifests (idempotente)
         shell: powershell
         run: |
           $ns = "${{ steps.vars.outputs.NAMESPACE }}"
-          # Aplique o que existir; se faltar algum arquivo, não quebra
           foreach ($f in @(
             "k8s/service.yaml",
             "k8s/deployment.yaml",
@@ -110,68 +95,47 @@ jobs:
             "k8s/prometheus-service.yaml",
             "k8s/prometheus-deployment.yaml",
             "k8s/prometheus-config.yaml"
-          )) {
-            if (Test-Path $f) {
-              Write-Host "kubectl apply -n $ns -f $f"
-              kubectl apply -n $ns -f $f
-            }
-          }
+          )) { if (Test-Path $f) { kubectl apply -n $ns -f $f } }
 
-      # =========== ROLLOUT com fallback ===========
-      - name: Set image (FULL SHA) e tentar rollout
+      # Rollout com fallback: FULL → SHORT → latest
+      - name: Set image (FULL SHA)
         shell: powershell
         continue-on-error: true
         run: |
           $ns = "${{ steps.vars.outputs.NAMESPACE }}"
-          $img = "${{ steps.vars.outputs.IMAGE }}:${{ steps.vars.outputs.FULL_SHA }}"
-          kubectl set image deploy/monitor monitor=$img -n $ns
+          kubectl set image deploy/monitor monitor="${{ steps.vars.outputs.IMAGE }}:${{ steps.vars.outputs.FULL_SHA }}" -n $ns
           kubectl rollout status deploy/monitor -n $ns --timeout=300s
 
-      - name: Fallback para SHORT SHA
+      - name: Fallback SHORT SHA
         if: ${{ failure() }}
         shell: powershell
         continue-on-error: true
         run: |
           $ns = "${{ steps.vars.outputs.NAMESPACE }}"
-          $img = "${{ steps.vars.outputs.IMAGE }}:${{ steps.vars.outputs.SHORT_SHA }}"
-          kubectl set image deploy/monitor monitor=$img -n $ns
+          kubectl set image deploy/monitor monitor="${{ steps.vars.outputs.IMAGE }}:${{ steps.vars.outputs.SHORT_SHA }}" -n $ns
           kubectl rollout status deploy/monitor -n $ns --timeout=300s
 
-      - name: Fallback final para :latest
+      - name: Fallback latest
         if: ${{ failure() }}
         shell: powershell
         run: |
           $ns = "${{ steps.vars.outputs.NAMESPACE }}"
-          $img = "${{ steps.vars.outputs.IMAGE }}:latest"
-          kubectl set image deploy/monitor monitor=$img -n $ns
+          kubectl set image deploy/monitor monitor="${{ steps.vars.outputs.IMAGE }}:latest" -n $ns
           kubectl rollout status deploy/monitor -n $ns --timeout=300s
 
-      # =========== DIAGNÓSTICO SE FALHAR ===========
       - name: Diagnose on failure
         if: ${{ failure() }}
         shell: powershell
         run: |
           $ns = "${{ steps.vars.outputs.NAMESPACE }}"
-          Write-Host "==== DESCRIBE DEPLOYMENT ===="
           kubectl describe deployment/monitor -n $ns
-          Write-Host "==== REPLICASETS ===="
           kubectl get rs -n $ns -l app=monitor -o wide
           kubectl describe rs -n $ns -l app=monitor
-          Write-Host "==== PODS ===="
           kubectl get pods -n $ns -l app=monitor -o wide
-          Write-Host "==== EVENTS (últimos 200) ===="
           kubectl get events -n $ns --sort-by=.lastTimestamp | Select-Object -Last 200
-          Write-Host "==== LOGS (últimos 200 por contêiner) ===="
-          $pods = kubectl get pods -n $ns -l app=monitor -o jsonpath='{.items[*].metadata.name}'
-          foreach ($p in $pods.Split(' ')) {
-            if ($p) {
-              Write-Host "---- $p ----"
-              kubectl logs $p -n $ns --all-containers --tail=200
-            }
-          }
 
       - name: Show services (debug)
         shell: powershell
         run: |
-          kubectl get svc -n "${{ steps.vars.outputs.NAMESPACE }}"
-          kubectl get pods -o wide -n "${{ steps.vars.outputs.NAMESPACE }}"
+          kubectl get svc  -n "${{ steps.vars.outputs.NAMESPACE }}"
+          kubectl get pods -n "${{ steps.vars.outputs.NAMESPACE }}" -o wide
