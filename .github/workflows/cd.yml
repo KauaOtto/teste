@@ -43,8 +43,15 @@ jobs:
         # opcional: exporta variável para steps seguintes
       - name: Verify cluster
         run: |
-          kubectl version --short
-          kubectl cluster-info
+          kubectl config current-context
+          kubectl version --client || true
+          # tenta por até 30s
+          for i in {1..6}; do
+            kubectl get nodes -o wide && exit 0
+            echo "Aguardando API do cluster..."
+            sleep 5
+          done
+          echo "Cluster inacessível"; exit 1
 
       - name: Create namespace if not exists
         run: |
