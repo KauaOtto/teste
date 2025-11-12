@@ -1,0 +1,12 @@
+﻿{
+  "repositoryName": "KauaOtto/teste",
+  "pipelineDirectory": "teste",
+  "workspaceDirectory": "teste\\teste",
+  "repositories": {
+    "KauaOtto/teste": {
+      "repositoryPath": "teste\\teste",
+      "lastRunOn": "11/12/2025 10:38:05 -03:00"
+    }
+  },
+  "lastRunOn": "11/12/2025 10:38:05 -03:00"
+}

@@ -11,10 +11,7 @@ permissions:
 jobs:
   deploy:
     if: ${{ github.event.workflow_run.conclusion == 'success' }}
-    # usa seu runner
     runs-on: self-hosted
-    # opcional: se você registrou labels (ex.: linux, x64), pode usar:
-    # runs-on: [self-hosted, linux, x64]
     environment: production
 
     steps:
@@ -23,67 +20,75 @@ jobs:
 
       - name: Set vars
         id: vars
+        shell: pwsh
         run: |
-          echo "IMAGE=kaua45otto/monitor" >> "$GITHUB_OUTPUT"
-          echo "TAG_SHA=${{ github.event.workflow_run.head_sha }}" >> "$GITHUB_OUTPUT"
-          echo "NAMESPACE=${{ secrets.K8S_NAMESPACE || 'default' }}" >> "$GITHUB_OUTPUT"
-          # Opcional: force um contexto específico via secret
-          if [ -n "${{ secrets.K8S_CONTEXT }}" ]; then
-            echo "K8S_CONTEXT=${{ secrets.K8S_CONTEXT }}" >> "$GITHUB_OUTPUT"
-          fi
+          "IMAGE=kaua45otto/monitor" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "TAG_SHA=${{ github.event.workflow_run.head_sha }}" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          $namespace = if ("${{ secrets.K8S_NAMESPACE }}") { "${{ secrets.K8S_NAMESPACE }}" } else { "default" }
+          "NAMESPACE=$namespace" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
-      # Se o runner já tiver kubectl instalado, pode remover este passo.
       - name: Setup kubectl
         uses: azure/setup-kubectl@v4
         with:
           version: 'latest'
 
-      - name: Select context (optional)
-        if: ${{ steps.vars.outputs.K8S_CONTEXT != '' }}
-        run: |
-          kubectl config use-context "${{ steps.vars.outputs.K8S_CONTEXT }}"
-
       - name: Verify cluster
+        shell: pwsh
         run: |
-          kubectl config current-context || true
-          kubectl version --client || true
-          for i in {1..6}; do
-            kubectl get nodes -o wide && exit 0
-            echo "Aguardando API do cluster..."
-            sleep 5
-          done
-          echo "Cluster inacessível"; exit 1
+          kubectl config current-context
+          kubectl version --client
+          $ok = $false
+          for ($i = 0; $i -lt 6; $i++) {
+            try {
+              kubectl get nodes -o wide
+              $ok = $true
+              break
+            } catch {
+              Write-Host "Aguardando API do cluster..."
+              Start-Sleep -Seconds 5
+            }
+          }
+          if (-not $ok) {
+            Write-Error "Cluster inacessível"
+            exit 1
+          }
 
       - name: Create namespace if not exists
+        shell: pwsh
         run: |
-          kubectl get ns "${{ steps.vars.outputs.NAMESPACE }}" >/dev/null 2>&1 || \
-          kubectl create ns "${{ steps.vars.outputs.NAMESPACE }}"
+          $ns = "${{ steps.vars.outputs.NAMESPACE }}"
+          if (-not (kubectl get ns $ns -ErrorAction SilentlyContinue)) {
+            kubectl create ns $ns
+          }
 
-      - name: Apply base manifests (Service, Prometheus, Grafana, Nginx)
+      - name: Apply base manifests
+        shell: pwsh
         run: |
-          kubectl apply -n "${{ steps.vars.outputs.NAMESPACE }}" -f k8s/service.yaml || true
-          kubectl apply -n "${{ steps.vars.outputs.NAMESPACE }}" -f k8s/prometheus-deployment.yaml || true
-          kubectl apply -n "${{ steps.vars.outputs.NAMESPACE }}" -f k8s/grafana-deployment.yaml || true
-          kubectl apply -n "${{ steps.vars.outputs.NAMESPACE }}" -f k8s/nginx-deployment.yaml || true
-          kubectl apply -n "${{ steps.vars.outputs.NAMESPACE }}" -f k8s/nginx-service.yaml || true
-          kubectl apply -n "${{ steps.vars.outputs.NAMESPACE }}" -f k8s/prometheus-config.yaml || true
+          $ns = "${{ steps.vars.outputs.NAMESPACE }}"
+          kubectl apply -n $ns -f k8s/service.yaml
+          kubectl apply -n $ns -f k8s/prometheus-deployment.yaml
+          kubectl apply -n $ns -f k8s/grafana-deployment.yaml
+          kubectl apply -n $ns -f k8s/nginx-deployment.yaml
+          kubectl apply -n $ns -f k8s/nginx-service.yaml
+          kubectl apply -n $ns -f k8s/prometheus-config.yaml
 
-      - name: Apply app deployment (first time / idempotente)
+      - name: Apply app deployment
+        shell: pwsh
         run: |
           kubectl apply -n "${{ steps.vars.outputs.NAMESPACE }}" -f k8s/deployment.yaml
 
       - name: Set image to new tag
+        shell: pwsh
         run: |
-          kubectl set image deployment/monitor \
-            monitor="${{ steps.vars.outputs.IMAGE }}:${{ steps.vars.outputs.TAG_SHA }}" \
-            -n "${{ steps.vars.outputs.NAMESPACE }}"
+          kubectl set image deployment/monitor monitor="${{ steps.vars.outputs.IMAGE }}:${{ steps.vars.outputs.TAG_SHA }}" -n "${{ steps.vars.outputs.NAMESPACE }}"
 
       - name: Wait rollout
+        shell: pwsh
         run: |
-          kubectl rollout status deployment/monitor \
-            -n "${{ steps.vars.outputs.NAMESPACE }}" --timeout=180s
+          kubectl rollout status deployment/monitor -n "${{ steps.vars.outputs.NAMESPACE }}" --timeout=180s
 
       - name: Show services (debug)
+        shell: pwsh
         run: |
           kubectl get svc -n "${{ steps.vars.outputs.NAMESPACE }}"
           kubectl get pods -o wide -n "${{ steps.vars.outputs.NAMESPACE }}"
