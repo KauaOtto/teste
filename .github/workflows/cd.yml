@@ -11,7 +11,10 @@ permissions:
 jobs:
   deploy:
     if: ${{ github.event.workflow_run.conclusion == 'success' }}
-    runs-on: ubuntu-latest
+    # usa seu runner
+    runs-on: self-hosted
+    # opcional: se você registrou labels (ex.: linux, x64), pode usar:
+    # runs-on: [self-hosted, linux, x64]
     environment: production
 
     steps:
@@ -22,45 +25,28 @@ jobs:
         id: vars
         run: |
           echo "IMAGE=kaua45otto/monitor" >> "$GITHUB_OUTPUT"
-          # usa o SHA do workflow de CI que disparou este CD
           echo "TAG_SHA=${{ github.event.workflow_run.head_sha }}" >> "$GITHUB_OUTPUT"
           echo "NAMESPACE=${{ secrets.K8S_NAMESPACE || 'default' }}" >> "$GITHUB_OUTPUT"
+          # Opcional: force um contexto específico via secret
+          if [ -n "${{ secrets.K8S_CONTEXT }}" ]; then
+            echo "K8S_CONTEXT=${{ secrets.K8S_CONTEXT }}" >> "$GITHUB_OUTPUT"
+          fi
 
+      # Se o runner já tiver kubectl instalado, pode remover este passo.
       - name: Setup kubectl
         uses: azure/setup-kubectl@v4
         with:
           version: 'latest'
 
-      - name: Configure kubeconfig
-        env:
-          KUBE_CONFIG_DATA: ${{ secrets.KUBE_CONFIG_DATA }}
+      - name: Select context (optional)
+        if: ${{ steps.vars.outputs.K8S_CONTEXT != '' }}
         run: |
-          set -euo pipefail
-          mkdir -p "$HOME/.kube"
-
-          # Se o secret já for YAML (contém 'apiVersion:'), grava direto.
-          # Senão, decodifica de base64.
-          if echo "$KUBE_CONFIG_DATA" | grep -q "^apiVersion:"; then
-            echo "Detected plain YAML kubeconfig in secret."
-            printf "%s\n" "$KUBE_CONFIG_DATA" > "$HOME/.kube/config"
-          else
-            echo "Detected base64 kubeconfig in secret."
-            printf "%s" "$KUBE_CONFIG_DATA" | base64 -di > "$HOME/.kube/config"
-          fi
-
-          # Remove CRLF (Windows) e garante perms
-          sed -i 's/\r$//' "$HOME/.kube/config"
-          chmod 600 "$HOME/.kube/config"
-
-          # Validação rápida (falha cedo se estiver errado)
-          head -n 5 "$HOME/.kube/config"
-          grep -q '^apiVersion:' "$HOME/.kube/config" || { echo "Invalid kubeconfig: missing apiVersion"; cat "$HOME/.kube/config"; exit 1; }
+          kubectl config use-context "${{ steps.vars.outputs.K8S_CONTEXT }}"
 
       - name: Verify cluster
         run: |
           kubectl config current-context || true
           kubectl version --client || true
-          # tenta por até 30s
           for i in {1..6}; do
             kubectl get nodes -o wide && exit 0
             echo "Aguardando API do cluster..."

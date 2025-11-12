@@ -1,0 +1,11 @@
+﻿{
+  "agentId": 2,
+  "agentName": "ci_cd",
+  "poolId": 1,
+  "poolName": "Default",
+  "serverUrl": "https://pipelinesghubeus5.actions.githubusercontent.com/5LJ5dINjRoXyEhB9CgxgpprkgEBKbqtWqA1uWoe85j50f6ud27/",
+  "gitHubUrl": "https://github.com/KauaOtto/teste",
+  "workFolder": "_work",
+  "useV2Flow": true,
+  "serverUrlV2": "https://broker.actions.githubusercontent.com/"
+}
