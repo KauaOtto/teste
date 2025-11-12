@@ -2,9 +2,9 @@ name: CD - Deploy to Kubernetes
 
 on:
   workflow_run:
-    workflows: ["CI - Build & Push Docker"]   # deve ser idêntico ao name do seu CI
+    workflows: ["CI - Build & Push Docker"]  # tem que ser idêntico ao "name:" do seu CI
     types: [completed]
-  workflow_dispatch: {}                        # permite rodar manualmente
+  workflow_dispatch: {}                       # permite disparar manual pra testar
 
 permissions:
   contents: read
@@ -12,46 +12,47 @@ permissions:
 jobs:
   deploy:
     if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
-    runs-on: [self-hosted, Windows, X64]       # use as labels que seu runner mostra em Settings > Actions > Runners
+    runs-on: [self-hosted, Windows, X64]      # use as labels EXACT do seu runner
     environment: production
 
+    # >>> Shell padrão: Windows PowerShell (não pwsh)
     defaults:
       run:
-        shell: pwsh
+        shell: powershell
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          # Em runners self-hosted às vezes o "clean" falha; se continuar dando 128, troque para clean: false
+          clean: true
+
+      # Se ainda aparecer erro 128 de git (repo sujo), descomente este passo:
+      # - name: Git safe directory fix (optional)
+      #   run: |
+      #     git config --global --add safe.directory '*'
 
       - name: Set vars
         id: vars
         run: |
-          # IMAGE
-          "IMAGE=kaua45otto/monitor" | Add-Content -Path $env:GITHUB_OUTPUT
+          "IMAGE=kaua45otto/monitor" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
-          # TAG_SHA (usa o SHA do workflow de origem se vier de workflow_run; senão o SHA atual)
           if ("${{ github.event_name }}" -eq "workflow_run") {
             $sha = "${{ github.event.workflow_run.head_sha }}"
           } else {
             $sha = "${{ github.sha }}"
           }
-          "TAG_SHA=$sha" | Add-Content -Path $env:GITHUB_OUTPUT
+          "TAG_SHA=$sha" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
-          # NAMESPACE (secret ou default)
           $ns = "${{ secrets.K8S_NAMESPACE }}"
           if ([string]::IsNullOrWhiteSpace($ns)) { $ns = "default" }
-          "NAMESPACE=$ns" | Add-Content -Path $env:GITHUB_OUTPUT
+          "NAMESPACE=$ns" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
-          # (opcional) contexto do kubectl (ex.: minikube ou docker-desktop)
-          $ctx = "${{ secrets.K8S_CONTEXT }}"
+          $ctx = "${{ secrets.K8S_CONTEXT }}"  # opcional (ex.: minikube, docker-desktop)
           if (-not [string]::IsNullOrWhiteSpace($ctx)) {
-            "K8S_CONTEXT=$ctx" | Add-Content -Path $env:GITHUB_OUTPUT
+            "K8S_CONTEXT=$ctx" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           }
-
-          Write-Host "IMAGE: ${{ steps.vars.outputs.IMAGE }}"
-          Write-Host "TAG_SHA: ${{ steps.vars.outputs.TAG_SHA }}"
-          Write-Host "NAMESPACE: ${{ steps.vars.outputs.NAMESPACE }}"
-          Write-Host "K8S_CONTEXT: ${{ steps.vars.outputs.K8S_CONTEXT }}"
 
       - name: Setup kubectl
         uses: azure/setup-kubectl@v4
@@ -100,17 +101,13 @@ jobs:
 
       - name: Set image to new tag
         run: |
-          kubectl set image deployment/monitor `
-            monitor="${{ steps.vars.outputs.IMAGE }}:${{ steps.vars.outputs.TAG_SHA }}" `
-            -n "${{ steps.vars.outputs.NAMESPACE }}"
+          kubectl set image deployment/monitor monitor="${{ steps.vars.outputs.IMAGE }}:${{ steps.vars.outputs.TAG_SHA }}" -n "${{ steps.vars.outputs.NAMESPACE }}"
 
       - name: Wait rollout
         run: |
-          kubectl rollout status deployment/monitor `
-            -n "${{ steps.vars.outputs.NAMESPACE }}" --timeout=180s
+          kubectl rollout status deployment/monitor -n "${{ steps.vars.outputs.NAMESPACE }}" --timeout=180s
 
       - name: Show services (debug)
         run: |
           kubectl get svc -n "${{ steps.vars.outputs.NAMESPACE }}"
           kubectl get pods -o wide -n "${{ steps.vars.outputs.NAMESPACE }}"
-
