@@ -14,7 +14,7 @@ spec:
     spec:
       containers:
         - name: monitor
-          image: kaua45otto/monitor:v3
+          image: kaua45otto/monitor:latest
           imagePullPolicy: Always
           ports:
             - containerPort: 3000
